@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import onnxruntime as ort
 import time
 import subprocess
 import random
@@ -8,19 +9,20 @@ from collections import deque
 from picamera2 import Picamera2
 
 
-# ==========================================
-# SCHREIBTISCHASSISTENT - RASPBERRY PI 5
-# ==========================================
+# =====================================
+# SCHREIBTISCHASSISTENT
+# RASPBERRY PI 5
+# =====================================
 
 
-# ==========================================
 # EINSTELLUNGEN
-# ==========================================
+
+MODEL_PFAD = "models/emotion-ferplus-12-int8.onnx"
 
 KAMERA_BREITE = 640
 KAMERA_HOEHE = 480
 
-ERKENNUNGS_SICHERHEIT = 0.50
+SICHERHEIT = 0.50
 
 WARTEZEIT = 15
 
@@ -28,13 +30,10 @@ VERLAUF_GROESSE = 20
 
 MINDEST_EMOTIONEN = 12
 
-KI_AKTIV = True
-SPRACHE_AKTIV = True
 
-
-# ==========================================
+# =====================================
 # EMOTIONEN
-# ==========================================
+# =====================================
 
 EMOTIONEN = [
     "NEUTRAL",
@@ -48,29 +47,29 @@ EMOTIONEN = [
 ]
 
 
-# ==========================================
+# =====================================
 # MOTIVATIONSSPRUECHE
-# ==========================================
+# =====================================
 
 SPRUECHE = {
 
     "TRAURIG": [
         "Kopf hoch! Du bist staerker als du denkst!",
-        "Gib nicht auf! Jeder neue Tag ist eine Chance!",
-        "Du schaffst das! Glaub an dich!",
+        "Gib nicht auf! Jeder Tag ist eine neue Chance!",
+        "Du schaffst das!",
         "Auch schlechte Tage gehen vorbei!"
     ],
 
     "SAUER": [
-        "Atme tief durch! Du hast alles im Griff!",
-        "Bleib ruhig! Du kannst alles schaffen!",
+        "Atme tief durch!",
+        "Bleib ruhig! Du schaffst das!",
         "Lass dich nicht unterkriegen!"
     ],
 
     "GLUECKLICH": [
         "Super! Behalte dein Laecheln!",
         "Deine gute Laune steckt an!",
-        "Schoen, dass du so gut drauf bist!"
+        "Schoen, dass du gut drauf bist!"
     ],
 
     "NEUTRAL": [
@@ -85,12 +84,12 @@ SPRUECHE = {
     ],
 
     "EKEL": [
-        "Alles gut! Atme einmal tief durch!"
+        "Alles gut!"
     ],
 
     "ANGST": [
-        "Du schaffst das! Schritt fuer Schritt!",
-        "Bleib ruhig, du bist nicht allein!"
+        "Du schaffst das!",
+        "Bleib ruhig! Schritt fuer Schritt!"
     ],
 
     "VERACHTUNG": [
@@ -99,44 +98,45 @@ SPRUECHE = {
 }
 
 
-# ==========================================
+# =====================================
 # FARBEN
-# ==========================================
+# =====================================
 
 FARBEN = {
 
     "GLUECKLICH": (0, 255, 0),
-
     "TRAURIG": (255, 0, 0),
-
     "SAUER": (0, 0, 255),
-
     "NEUTRAL": (255, 255, 255),
-
     "ANGST": (255, 0, 255),
-
     "UEBERRASCHT": (0, 255, 255),
-
     "EKEL": (0, 165, 255),
-
     "VERACHTUNG": (255, 255, 0)
+
 }
 
 
-# ==========================================
+# =====================================
 # SPRACHAUSGABE
-# ==========================================
+# =====================================
+
+sprech_prozess = None
+
 
 def sprechen(text):
 
-    if not SPRACHE_AKTIV:
-        return
+    global sprech_prozess
 
     print("ASSISTENT:", text)
 
     try:
 
-        subprocess.Popen([
+        if sprech_prozess is not None:
+
+            if sprech_prozess.poll() is None:
+                return
+
+        sprech_prozess = subprocess.Popen([
             "espeak-ng",
             "-v", "de",
             "-s", "145",
@@ -148,9 +148,9 @@ def sprechen(text):
         print("Sprachfehler:", fehler)
 
 
-# ==========================================
+# =====================================
 # KAMERA STARTEN
-# ==========================================
+# =====================================
 
 def kamera_starten():
 
@@ -176,13 +176,11 @@ def kamera_starten():
     return kamera
 
 
-# ==========================================
-# GESICHTSERKENNUNG LADEN
-# ==========================================
+# =====================================
+# GESICHTSERKENNUNG
+# =====================================
 
-def gesichtserkennung_laden():
-
-    print("Lade Gesichtserkennung...")
+def gesicht_laden():
 
     gesicht = cv2.CascadeClassifier(
         cv2.data.haarcascades +
@@ -195,31 +193,35 @@ def gesichtserkennung_laden():
             "Gesichtserkennung konnte nicht geladen werden!"
         )
 
-    print("Gesichtserkennung geladen!")
-
     return gesicht
 
 
-# ==========================================
+# =====================================
 # KI MODELL LADEN
-# ==========================================
+# =====================================
 
 def ki_laden():
 
-    print("Lade KI-Modell...")
+    print("Lade Emotion-KI...")
 
-    ki = cv2.dnn.readNetFromONNX(
-        "models/emotion-ferplus-8.onnx"
+    ki = ort.InferenceSession(
+        MODEL_PFAD,
+        providers=["CPUExecutionProvider"]
     )
 
-    print("KI-Modell geladen!")
+    eingabe = ki.get_inputs()[0]
+
+    print("KI erfolgreich geladen!")
+    print("Eingabe:", eingabe.name)
+    print("Form:", eingabe.shape)
+    print("Datentyp:", eingabe.type)
 
     return ki
 
 
-# ==========================================
+# =====================================
 # EMOTION ERKENNEN
-# ==========================================
+# =====================================
 
 def erkenne_emotion(gesicht_bild, ki):
 
@@ -228,17 +230,30 @@ def erkenne_emotion(gesicht_bild, ki):
         (64, 64)
     )
 
-    blob = klein.astype(np.float32)
+    bild = klein.astype(np.float32)
 
-    blob = blob.reshape(
+    bild = bild.reshape(
         1, 1, 64, 64
     )
 
-    ki.setInput(blob)
+    eingabe = ki.get_inputs()[0]
 
-    ergebnis = ki.forward()
+    if eingabe.type == "tensor(uint8)":
 
-    werte = ergebnis.flatten()
+        bild = bild.astype(np.uint8)
+
+    elif eingabe.type == "tensor(int8)":
+
+        bild = bild.astype(np.int8)
+
+    ergebnis = ki.run(
+        None,
+        {eingabe.name: bild}
+    )
+
+    werte = np.asarray(
+        ergebnis[0]
+    ).flatten().astype(np.float64)
 
     # Softmax
 
@@ -257,53 +272,41 @@ def erkenne_emotion(gesicht_bild, ki):
     return emotion, sicherheit
 
 
-# ==========================================
+# =====================================
 # HAUPTPROGRAMM
-# ==========================================
+# =====================================
 
 def main():
-
-    print()
-    print("================================")
-    print(" SCHREIBTISCHASSISTENT")
-    print(" RASPBERRY PI 5")
-    print("================================")
-    print()
 
     kamera = None
 
     try:
 
-        # Kamera starten
+        print("==============================")
+        print(" SCHREIBTISCHASSISTENT")
+        print("==============================")
 
         kamera = kamera_starten()
 
-        # Gesichtserkennung laden
-
-        gesicht = gesichtserkennung_laden()
-
-        # KI laden
+        gesicht = gesicht_laden()
 
         ki = ki_laden()
-
-        # Verlauf speichern
 
         verlauf = deque(
             maxlen=VERLAUF_GROESSE
         )
 
-        letzte_ansage = 0
-
         letzte_emotion = ""
 
-        print()
-        print("KI MOTIVATIONSASSISTENT GESTARTET!")
-        print("Druecke ESC zum Beenden.")
-        print()
+        letzte_ansage = 0
 
-        # ==================================
+        print("KI ist bereit!")
+
+        sprechen("Hallo! Ich bin dein Schreibtischassistent.")
+
+        # =================================
         # HAUPTSCHLEIFE
-        # ==================================
+        # =================================
 
         while True:
 
@@ -330,26 +333,18 @@ def main():
                     x:x+w
                 ]
 
-                emotion = "NEUTRAL"
+                emotion, sicherheit = erkenne_emotion(
+                    gesicht_bild,
+                    ki
+                )
 
-                sicherheit = 0
-
-                if KI_AKTIV:
-
-                    emotion, sicherheit = erkenne_emotion(
-                        gesicht_bild,
-                        ki
-                    )
-
-                # Emotion speichern
-
-                if sicherheit >= ERKENNUNGS_SICHERHEIT:
+                if sicherheit >= SICHERHEIT:
 
                     verlauf.append(emotion)
 
-                # ==================================
-                # STABILE EMOTION ERMITTELN
-                # ==================================
+                # =================================
+                # STABILE EMOTION
+                # =================================
 
                 if len(verlauf) >= 15:
 
@@ -380,17 +375,17 @@ def main():
 
                             sprechen(spruch)
 
-                            letzte_ansage = time.time()
-
                             letzte_emotion = aktuelle_emotion
+
+                            letzte_ansage = time.time()
 
                 else:
 
                     erkannte_emotion = emotion
 
-                # ==================================
+                # =================================
                 # GESICHT MARKIEREN
-                # ==================================
+                # =================================
 
                 farbe = FARBEN.get(
                     emotion,
@@ -427,13 +422,13 @@ def main():
                     2
                 )
 
-            # ==================================
-            # STATUS ANZEIGEN
-            # ==================================
+            # =================================
+            # STATUS
+            # =================================
 
             cv2.putText(
                 bild,
-                "SCHREIBTISCHASSISTENT",
+                "SCHREIBTISCH ASSISTENT",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -451,19 +446,17 @@ def main():
                 2
             )
 
-            # ==================================
+            # =================================
             # BILD ANZEIGEN
-            # ==================================
+            # =================================
 
             cv2.imshow(
-                "Mein KI Motivationsassistent",
+                "Schreibtischassistent",
                 cv2.cvtColor(
                     bild,
                     cv2.COLOR_RGB2BGR
                 )
             )
-
-            # ESC beendet das Programm
 
             if cv2.waitKey(1) & 0xFF == 27:
 
@@ -471,7 +464,7 @@ def main():
 
     except KeyboardInterrupt:
 
-        print("Programm wird beendet...")
+        print("Programm beendet.")
 
     except Exception as fehler:
 
@@ -487,10 +480,6 @@ def main():
 
         print("Schreibtischassistent beendet!")
 
-
-# ==========================================
-# PROGRAMM STARTEN
-# ==========================================
 
 if __name__ == "__main__":
 
