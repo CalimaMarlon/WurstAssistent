@@ -1,0 +1,1 @@
+Lege hier die Datei emotion-ferplus-12-int8.onnx ab. Das Modell wird nicht mitgeliefert.
